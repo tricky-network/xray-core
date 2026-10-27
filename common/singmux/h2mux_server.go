@@ -65,7 +65,7 @@ func (s *Service) serveH2Mux(ctx context.Context, carrier net.Conn, owner *servi
 	server := &http2.Server{
 		MaxReadFrameSize: serverH2MuxOptions(ctx).MaxReadFrameSize,
 	}
-	server.ServeConn(carrier, &http2.ServeConnOpts{
+	server.ServeConn(newH2MuxWindowConn(carrier, h2MuxStreamWindow), &http2.ServeConnOpts{
 		Context: ctx,
 		Handler: owner.wrapH2MuxHandler(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 			s.handleH2MuxStream(writer, request, carrier, brutal, presence)
