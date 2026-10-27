@@ -728,19 +728,35 @@ type FragmentWriter struct {
 	fragment *Fragment
 	writer   io.Writer
 	count    uint64
+	// pending holds a ClientHello that arrived in several writes (XTLS Vision, short reads) until it is whole.
+	pending []byte
 }
 
 func (f *FragmentWriter) Write(b []byte) (int, error) {
+	if f.pending != nil {
+		f.pending = append(f.pending, b...)
+		if len(f.pending) <= 5 || len(f.pending) < 5+((int(f.pending[3])<<8)|int(f.pending[4])) {
+			return len(b), nil
+		}
+		hello := f.pending
+		f.pending = nil
+		f.count = 0
+		if _, err := f.Write(hello); err != nil {
+			return 0, err
+		}
+		return len(b), nil
+	}
 	f.count++
 
 	if f.fragment.PacketsFrom == 0 && f.fragment.PacketsTo == 1 {
-		if f.count != 1 || len(b) <= 5 || b[0] != 22 {
+		if f.count != 1 || len(b) == 0 || b[0] != 22 {
 			return f.writer.Write(b)
+		}
+		if len(b) <= 5 || len(b) < 5+((int(b[3])<<8)|int(b[4])) {
+			f.pending = append([]byte(nil), b...)
+			return len(b), nil
 		}
 		recordLen := 5 + ((int(b[3]) << 8) | int(b[4]))
-		if len(b) < recordLen { // maybe already fragmented somehow
-			return f.writer.Write(b)
-		}
 		data := b[5:recordLen]
 		buff := make([]byte, 2048)
 		var hello []byte
