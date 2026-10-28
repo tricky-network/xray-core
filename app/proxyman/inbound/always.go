@@ -147,6 +147,7 @@ func NewAlwaysOnInboundHandler(ctx context.Context, tag string, receiverConfig *
 				sniffingRequest: sniffingRequest,
 				uplinkCounter:   uplinkCounter,
 				downlinkCounter: downlinkCounter,
+				h2mux:           receiverH2MuxOptions(receiverConfig),
 				ctx:             ctx,
 			}
 			h.workers = append(h.workers, worker)

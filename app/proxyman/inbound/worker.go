@@ -599,6 +599,8 @@ type dsWorker struct {
 	sniffingRequest session.SniffingRequest
 	uplinkCounter   stats.Counter
 	downlinkCounter stats.Counter
+	// Brutal is not wired here: TCP_CONGESTION cannot be set on a Unix socket.
+	h2mux singmux.H2MuxOptions
 
 	hub   internet.Listener
 	conns liveConnections
@@ -640,6 +642,9 @@ func (w *dsWorker) callback(conn stat.Connection) {
 	content := new(session.Content)
 	content.SniffingRequest = w.sniffingRequest
 	ctx = session.ContextWithContent(ctx, content)
+	if w.h2mux.MaxReadFrameSize != 0 {
+		ctx = singmux.ContextWithServerH2MuxOptions(ctx, w.h2mux)
+	}
 
 	if err := w.proxy.Process(ctx, net.Network_UNIX, conn, w.dispatcher); err != nil {
 		errors.LogInfoInner(ctx, err, "connection ends")
