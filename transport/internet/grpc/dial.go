@@ -43,6 +43,10 @@ type dialerConf struct {
 	*internet.MemoryStreamConfig
 }
 
+// connWindowCeiling is the window gRPC's dynamic flow control grows up to
+// (bdpLimit in google.golang.org/grpc/internal/transport).
+const connWindowCeiling = 16 << 20
+
 var (
 	globalDialerMap    map[dialerConf]*grpc.ClientConn
 	globalDialerAccess sync.Mutex
@@ -171,7 +175,14 @@ func getGrpcClient(ctx context.Context, dest net.Destination, streamSettings *in
 	}
 
 	if grpcSettings.InitialWindowsSize > 0 {
-		dialOptions = append(dialOptions, grpc.WithInitialWindowSize(grpcSettings.InitialWindowsSize))
+		// A static stream window also turns off the dynamic connection
+		// window, which would stay at 64 KiB for all streams together.
+		// The client returns connection credit on receipt, so only the
+		// stream window bounds what a slow reader leaves buffered.
+		dialOptions = append(dialOptions,
+			grpc.WithInitialWindowSize(grpcSettings.InitialWindowsSize),
+			grpc.WithInitialConnWindowSize(max(grpcSettings.InitialWindowsSize, connWindowCeiling)),
+		)
 	}
 
 	var grpcDestHost string
