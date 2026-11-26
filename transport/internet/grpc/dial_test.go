@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	stdnet "net"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -11,8 +12,10 @@ import (
 
 	"github.com/xtls/xray-core/common/net"
 	"github.com/xtls/xray-core/transport/internet"
+	"github.com/xtls/xray-core/transport/internet/grpc/encoding"
 	"github.com/xtls/xray-core/transport/internet/tls"
 	"golang.org/x/net/http2"
+	"google.golang.org/grpc"
 )
 
 // closeCachedClients closes and forgets the gRPC clients Dial cached for
@@ -179,5 +182,104 @@ func readClientWindows(conn stdnet.Conn, stream, connIncrement *uint32) error {
 		case *http2.HeadersFrame:
 			return nil
 		}
+	}
+}
+
+type holdStreamServer struct {
+	encoding.UnimplementedGRPCServiceServer
+	started   chan struct{}
+	cancelled chan struct{}
+}
+
+func (s *holdStreamServer) Tun(stream encoding.GRPCService_TunServer) error {
+	close(s.started)
+	<-stream.Context().Done()
+	close(s.cancelled)
+	return nil
+}
+
+func (s *holdStreamServer) TunMulti(stream encoding.GRPCService_TunMultiServer) error {
+	close(s.started)
+	<-stream.Context().Done()
+	close(s.cancelled)
+	return nil
+}
+
+func countGRPCStreamWatchers() int {
+	buf := make([]byte, 1<<20)
+	n := runtime.Stack(buf, true)
+	return strings.Count(string(buf[:n]), "google.golang.org/grpc.newClientStreamWithParams.func4")
+}
+
+// Closing a dialed gRPC connection must cancel its stream context even when
+// the caller's Dial context stays alive and Read is never drained to EOF;
+// otherwise grpc-go's stream watcher goroutine and receive buffer leak until
+// the cached ClientConn shuts down.
+func TestDialCloseCancelsStream(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		multiMode bool
+	}{
+		{name: "tun", multiMode: false},
+		{name: "tun-multi", multiMode: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			listener, err := stdnet.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			srv := &holdStreamServer{
+				started:   make(chan struct{}),
+				cancelled: make(chan struct{}),
+			}
+			grpcServer := grpc.NewServer()
+			encoding.RegisterGRPCServiceServerX(grpcServer, srv, "svc", "Tun", "TunMulti")
+			serveDone := make(chan struct{})
+			go func() {
+				defer close(serveDone)
+				_ = grpcServer.Serve(listener)
+			}()
+			t.Cleanup(func() {
+				grpcServer.Stop()
+				_ = listener.Close()
+				<-serveDone
+			})
+
+			dest := net.TCPDestination(net.LocalHostIP, net.Port(listener.Addr().(*stdnet.TCPAddr).Port))
+			t.Cleanup(func() { closeCachedClients(dest) })
+			streamSettings := &internet.MemoryStreamConfig{
+				ProtocolName:     protocolName,
+				ProtocolSettings: &Config{ServiceName: "svc", MultiMode: tc.multiMode},
+			}
+
+			baseline := countGRPCStreamWatchers()
+			conn, err := Dial(context.Background(), dest, streamSettings)
+			if err != nil {
+				t.Fatal(err)
+			}
+			select {
+			case <-srv.started:
+			case <-time.After(5 * time.Second):
+				t.Fatal("server did not receive stream")
+			}
+
+			if err := conn.Close(); err != nil {
+				t.Fatalf("conn.Close: %v", err)
+			}
+
+			select {
+			case <-srv.cancelled:
+			case <-time.After(5 * time.Second):
+				t.Fatal("closing dialed conn did not cancel server stream")
+			}
+
+			deadline := time.Now().Add(5 * time.Second)
+			for countGRPCStreamWatchers() > baseline {
+				if time.Now().After(deadline) {
+					t.Fatalf("gRPC stream watcher goroutine leaked: got %d, baseline %d", countGRPCStreamWatchers(), baseline)
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		})
 	}
 }

@@ -127,9 +127,10 @@ func (h *HunkReaderWriter) Close() error {
 	if h.cancel != nil {
 		h.cancel()
 	}
+	_ = h.done.Close()
 	if sc, match := h.hc.(StreamCloser); match {
 		return sc.CloseSend()
 	}
 
-	return h.done.Close()
+	return nil
 }
